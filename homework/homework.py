@@ -95,3 +95,154 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+import gzip
+import json
+import os
+import pickle
+
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.decomposition import PCA
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
+from sklearn.model_selection import GridSearchCV
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.svm import SVC
+
+
+def clean_dataset(df):
+    df = df.copy()
+    df = df.rename(columns={"default payment next month": "default"})
+    df = df.drop(columns=["ID"])
+    df = df.loc[df["EDUCATION"] != 0]
+    df = df.loc[df["MARRIAGE"] != 0]
+    df["EDUCATION"] = df["EDUCATION"].apply(lambda x: 4 if x > 4 else x)
+    return df
+
+
+def load_datasets():
+    train_df = pd.read_csv(
+        "files/input/train_data.csv.zip", index_col=False, compression="zip"
+    )
+    test_df = pd.read_csv(
+        "files/input/test_data.csv.zip", index_col=False, compression="zip"
+    )
+
+    train_df = clean_dataset(train_df)
+    test_df = clean_dataset(test_df)
+
+    x_train = train_df.drop(columns=["default"])
+    y_train = train_df["default"]
+    x_test = test_df.drop(columns=["default"])
+    y_test = test_df["default"]
+
+    return x_train, y_train, x_test, y_test
+
+
+def make_pipeline():
+    categorical_features = ["SEX", "EDUCATION", "MARRIAGE"]
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("cat", OneHotEncoder(), categorical_features),
+        ],
+        remainder="passthrough",
+    )
+
+    pipeline = Pipeline(
+        steps=[
+            ("preprocessor", preprocessor),
+            ("pca", PCA()),
+            ("scaler", StandardScaler()),
+            ("selectkbest", SelectKBest(score_func=f_classif)),
+            ("svc", SVC()),
+        ]
+    )
+
+    return pipeline
+
+
+def make_estimator():
+    pipeline = make_pipeline()
+
+    param_grid = {
+        "selectkbest__k": [4],
+        "svc__kernel": ["rbf"],
+        "svc__gamma": ["scale"],
+        "svc__C": [12.5, 13.5, 14.5],
+    }
+
+    model = GridSearchCV(
+        estimator=pipeline,
+        param_grid=param_grid,
+        cv=10,
+        scoring="balanced_accuracy",
+        n_jobs=-1,
+    )
+
+    return model
+
+
+def save_model(model):
+    os.makedirs("files/models", exist_ok=True)
+    with gzip.open("files/models/model.pkl.gz", "wb") as file:
+        pickle.dump(model, file)
+
+
+def compute_metrics(dataset_name, y_true, y_pred):
+    return {
+        "type": "metrics",
+        "dataset": dataset_name,
+        "precision": precision_score(y_true, y_pred),
+        "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
+        "recall": recall_score(y_true, y_pred),
+        "f1_score": f1_score(y_true, y_pred),
+    }
+
+
+def compute_confusion_matrix(dataset_name, y_true, y_pred):
+    cm = confusion_matrix(y_true, y_pred)
+    return {
+        "type": "cm_matrix",
+        "dataset": dataset_name,
+        "true_0": {"predicted_0": int(cm[0, 0]), "predicted_1": int(cm[0, 1])},
+        "true_1": {"predicted_0": int(cm[1, 0]), "predicted_1": int(cm[1, 1])},
+    }
+
+
+def save_metrics(model, x_train, y_train, x_test, y_test):
+    y_train_pred = model.predict(x_train)
+    y_test_pred = model.predict(x_test)
+
+    metrics = [
+        compute_metrics("train", y_train, y_train_pred),
+        compute_metrics("test", y_test, y_test_pred),
+        compute_confusion_matrix("train", y_train, y_train_pred),
+        compute_confusion_matrix("test", y_test, y_test_pred),
+    ]
+
+    os.makedirs("files/output", exist_ok=True)
+    with open("files/output/metrics.json", "w", encoding="utf-8") as file:
+        for entry in metrics:
+            file.write(json.dumps(entry) + "\n")
+
+
+def main():
+    x_train, y_train, x_test, y_test = load_datasets()
+
+    model = make_estimator()
+    model.fit(x_train, y_train)
+
+    save_model(model)
+    save_metrics(model, x_train, y_train, x_test, y_test)
+
+
+if __name__ == "__main__":
+    main()
